@@ -126,8 +126,11 @@ class User(TimestampMixin, table=True):
     )
     avatar_url: Optional[str] = Field(default=None, max_length=2048)
 
-    # GitHub OAuth tokens (store encrypted in production)
-    github_access_token: Optional[str] = Field(default=None, max_length=512)
+    # GitHub OAuth tokens (stored Fernet-encrypted)
+    github_access_token: Optional[str] = Field(default=None, max_length=1024)
+
+    github_username: Optional[str] = Field(default=None, max_length=255)
+    github_avatar_url: Optional[str] = Field(default=None, max_length=2048)
 
     # Relationships
     repositories: List["Repository"] = Relationship(back_populates="owner")

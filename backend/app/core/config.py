@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
+    FRONTEND_URL: str = "http://localhost:5173"
+    ENCRYPTION_KEY: str = ""
 
     # Database
     # Local dev:  postgresql://postgres:postgres@localhost:5432/reflexion
