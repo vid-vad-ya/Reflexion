@@ -1,135 +1,110 @@
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import {
-  Github,
-  Bot,
-  Sparkles,
-  GitPullRequest,
-  RefreshCw,
-  ShieldCheck,
-  ArrowRight,
-} from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Github } from 'lucide-react';
+import Logo from './ui/Logo';
+import AnimatedBackground from './ui/AnimatedBackground';
 
-// ---------------------------------------------------------------------------
-// Login – Premium landing / sign-in page
-// ---------------------------------------------------------------------------
+const LIFECYCLE_STAGES = ['Observe', 'Plan', 'Code', 'Test', 'Reflect', 'Improve'];
 
 export default function Login() {
   const { isAuthenticated, isLoading, login } = useAuth();
   const navigate = useNavigate();
+  const [activeStage, setActiveStage] = useState(0);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
-  // If already authenticated, send straight to dashboard
+  // If already authenticated, redirect straight to dashboard
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
       navigate('/dashboard', { replace: true });
     }
   }, [isAuthenticated, isLoading, navigate]);
 
+  // Loop through lifecycle stages with smooth timing
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setActiveStage((prev) => (prev + 1) % LIFECYCLE_STAGES.length);
+    }, 2800);
+    return () => clearInterval(timer);
+  }, []);
+
+  const handleLoginClick = () => {
+    setIsRedirecting(true);
+    login();
+  };
+
   return (
-    <div className="login-page">
-      {/* Animated background orbs */}
-      <div className="login-bg-orb login-bg-orb--1" />
-      <div className="login-bg-orb login-bg-orb--2" />
-      <div className="login-bg-orb login-bg-orb--3" />
+    <div className="login-layout">
+      {/* Living background */}
+      <AnimatedBackground />
 
-      <div className="login-container">
-        {/* ---- Hero section ---- */}
-        <header className="login-hero">
-          <div className="login-logo-ring">
-            <Bot size={44} strokeWidth={1.5} />
-          </div>
-
-          <h1 className="login-title">
-            <span className="login-title-gradient">Reflexion</span>
-          </h1>
-
-          <p className="login-subtitle">
-            The Self-Correcting AI Coding Agent
-          </p>
-
-          <p className="login-tagline">
-            Describe a feature. Reflexion generates code, runs tests, reflects
-            on failures, and iterates — then opens a pull request when it's
-            right.
-          </p>
-        </header>
-
-        {/* ---- Glass card ---- */}
-        <div className="login-card">
-          <div className="login-card-inner">
-            {/* Feature pills */}
-            <div className="login-features">
-              <FeaturePill
-                icon={<Sparkles size={16} />}
-                label="Generate"
-                description="AI writes implementation code"
-              />
-              <FeaturePill
-                icon={<RefreshCw size={16} />}
-                label="Test & Reflect"
-                description="Runs tests, learns from failures"
-              />
-              <FeaturePill
-                icon={<GitPullRequest size={16} />}
-                label="Ship"
-                description="Opens a polished pull request"
-              />
-              <FeaturePill
-                icon={<ShieldCheck size={16} />}
-                label="Verify"
-                description="Multi-attempt self-correction"
-              />
-            </div>
-
-            {/* CTA */}
-            <button
-              id="login-github-btn"
-              className="login-cta"
-              onClick={login}
-              disabled={isLoading}
-            >
-              <Github size={20} />
-              <span>Continue with GitHub</span>
-              <ArrowRight size={16} className="login-cta-arrow" />
-            </button>
-
-            <p className="login-disclaimer">
-              We only request <strong>read:user</strong> and{' '}
-              <strong>user:email</strong> scopes. Your code stays on GitHub.
-            </p>
-          </div>
+      <motion.div
+        initial={{ opacity: 0, y: 15 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+        className="login-hero-container"
+      >
+        {/* Abstract Logo */}
+        <div className="login-logo-container">
+          <Logo size={72} />
         </div>
 
-        {/* ---- Footer ---- */}
-        <footer className="login-footer">
-          Reflexion AI PR Agent &middot; Portfolio Prototype
-        </footer>
-      </div>
-    </div>
-  );
-}
+        {/* Core Headline */}
+        <h1 className="login-headline">Reflexion</h1>
 
-// ---------------------------------------------------------------------------
-// Sub-component
-// ---------------------------------------------------------------------------
+        {/* Subheadline */}
+        <h2 className="login-subheadline">
+          An autonomous software engineer that learns from its own mistakes.
+        </h2>
 
-function FeaturePill({
-  icon,
-  label,
-  description,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  description: string;
-}) {
-  return (
-    <div className="login-feature-pill">
-      <div className="login-feature-pill-icon">{icon}</div>
-      <div>
-        <span className="login-feature-pill-label">{label}</span>
-        <span className="login-feature-pill-desc">{description}</span>
-      </div>
+        {/* Context Description */}
+        <p className="login-description">
+          Reflexion silently connects to your repositories to plan implementations,
+          write clean code, run comprehensive tests, reflect on runtime and test
+          failures, and continuously improve its work—delivering verified production-ready
+          pull requests for human approval.
+        </p>
+
+        {/* GitHub Auth CTA */}
+        <motion.button
+          id="login-github-btn"
+          onClick={handleLoginClick}
+          disabled={isLoading || isRedirecting}
+          whileHover={{ scale: 1.01 }}
+          whileTap={{ scale: 0.99 }}
+          className="github-btn"
+        >
+          {isRedirecting || isLoading ? (
+            <span className="auth-loading-spinner mr-2" style={{ width: 16, height: 16 }} />
+          ) : (
+            <Github size={18} />
+          )}
+          <span>{isRedirecting ? 'Connecting to GitHub...' : 'Continue with GitHub'}</span>
+        </motion.button>
+
+        {/* Autonomous Engineering Lifecycle Timeline */}
+        <div className="lifecycle-rail">
+          {LIFECYCLE_STAGES.map((stage, idx) => (
+            <div
+              key={stage}
+              className={`lifecycle-node ${idx === activeStage ? 'active' : ''}`}
+            >
+              <motion.div
+                className="lifecycle-node-dot"
+                animate={
+                  idx === activeStage
+                    ? { scale: [1, 1.4, 1.2], opacity: 1 }
+                    : { scale: 1, opacity: 0.4 }
+                }
+                transition={{ duration: 0.4 }}
+              />
+              <span className="lifecycle-node-label">{stage}</span>
+            </div>
+          ))}
+          <div className="lifecycle-connector" />
+        </div>
+      </motion.div>
     </div>
   );
 }

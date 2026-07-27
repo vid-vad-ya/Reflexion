@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # Third-party APIs
     GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.0-flash"
 
     # Git Storage
     LOCAL_WORKSPACE_DIR: str = os.path.join(
