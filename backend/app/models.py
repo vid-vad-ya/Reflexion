@@ -187,6 +187,8 @@ class Repository(TimestampMixin, table=True):
     clone_url: str  = Field(max_length=2048)
     default_branch: str = Field(default="main", max_length=255)
     is_private: bool = Field(default=False)
+    local_path: Optional[str] = Field(default=None, max_length=1024)
+    clone_status: Optional[str] = Field(default="pending", max_length=32)
 
     # Relationships
     owner: Optional[User] = Relationship(back_populates="repositories")

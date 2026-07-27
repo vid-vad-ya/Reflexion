@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.repositories import router as repositories_router
 from app.core.config import settings
 
 
@@ -43,6 +44,7 @@ app.add_middleware(
 # API Routers
 # ---------------------------------------------------------------------------
 app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["Auth"])
+app.include_router(repositories_router, prefix=f"{settings.API_V1_STR}/repositories", tags=["Repositories"])
 
 
 @app.get("/")
