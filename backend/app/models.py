@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, String, func, text
+from sqlalchemy import BigInteger, Column, DateTime, Index, JSON, String, func, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -189,6 +189,11 @@ class Repository(TimestampMixin, table=True):
     is_private: bool = Field(default=False)
     local_path: Optional[str] = Field(default=None, max_length=1024)
     clone_status: Optional[str] = Field(default="pending", max_length=32)
+    project_summary: Optional[dict] = Field(
+        default=None,
+        sa_type=JSON,
+        sa_column_kwargs={"nullable": True},
+    )
 
     # Relationships
     owner: Optional[User] = Relationship(back_populates="repositories")
