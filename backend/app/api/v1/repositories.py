@@ -73,13 +73,16 @@ def clone_repository(
     owner_slug = payload.owner or "standalone"
     full_name = f"{owner_slug}/{payload.repository_name}"
 
+    import hashlib
+
     # Derive a stable synthetic github_repo_id when not provided.
-    # Uses a truncated hash of full_name to guarantee uniqueness per repo while
-    # remaining stable across repeated clone calls for the same repository.
+    # Uses a deterministic SHA-256 digest of full_name to guarantee uniqueness per repo
+    # and consistency across process restarts.
     if payload.github_repo_id is not None:
         effective_github_repo_id = payload.github_repo_id
     else:
-        effective_github_repo_id = abs(hash(full_name)) % (10 ** 15)
+        digest = hashlib.sha256(full_name.encode("utf-8")).hexdigest()
+        effective_github_repo_id = int(digest, 16) % (10 ** 15)
 
     try:
         clone_result = git_service.clone_repository(
