@@ -38,8 +38,8 @@ class RepositoryCloneRequest(BaseModel):
     owner: Optional[str] = Field(None, description="Repository owner or organization name")
     owner_id: uuid.UUID = Field(..., description="UUID of the authenticated User who owns this repository")
     github_repo_id: Optional[int] = Field(
-        None,
-        description="Numeric GitHub repository ID. If omitted, a stable synthetic ID is derived from full_name.",
+        default=None,
+        description="Numeric GitHub repository ID. If omitted or <= 0, automatically derived via GitHub API or synthetic SHA-256 fallback.",
     )
     is_private: bool = Field(False, description="Whether the repository is private on GitHub")
     access_token: Optional[str] = Field(None, description="Optional GitHub access token for private repositories")
@@ -58,6 +58,45 @@ class RepositoryAnalyzeRequest(BaseModel):
     force_refresh: bool = Field(False, description="If True, re-runs analysis bypassing cached ProjectSummary")
 
 
+def _resolve_github_repo_id(payload: RepositoryCloneRequest, full_name: str) -> int:
+    """Resolve a valid, positive GitHub repository ID (> 0).
+
+    1. If client explicitly supplies a positive integer > 0, use it.
+    2. Otherwise, attempt an optional lookup via GitHub REST API if accessible.
+    3. Otherwise, fall back to a deterministic positive SHA-256 integer derived from full_name.
+    """
+    if payload.github_repo_id is not None and payload.github_repo_id > 0:
+        return payload.github_repo_id
+
+    # Optional GitHub REST API lookup
+    if payload.owner and payload.repository_name:
+        try:
+            import httpx
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if payload.access_token:
+                headers["Authorization"] = f"Bearer {payload.access_token}"
+
+            api_url = f"https://api.github.com/repos/{payload.owner}/{payload.repository_name}"
+            with httpx.Client(timeout=2.0) as client:
+                res = client.get(api_url, headers=headers)
+                if res.status_code == 200:
+                    data = res.json()
+                    repo_id = data.get("id")
+                    if isinstance(repo_id, int) and repo_id > 0:
+                        logger.info(f"Retrieved real github_repo_id={repo_id} from GitHub API for '{full_name}'")
+                        return repo_id
+        except Exception as e:
+            logger.debug(f"GitHub API metadata lookup skipped or failed for '{full_name}': {e}")
+
+    # Fallback: Deterministic synthetic SHA-256 digest of full_name
+    # Modulo (10^15 - 1) + 1 guarantees a strictly positive integer between 1 and 10^15 (never 0)
+    import hashlib
+    digest = hashlib.sha256(full_name.encode("utf-8")).hexdigest()
+    synthetic_id = (int(digest, 16) % (10 ** 15 - 1)) + 1
+    logger.info(f"Derived synthetic github_repo_id={synthetic_id} for '{full_name}'")
+    return synthetic_id
+
+
 @router.post("/clone", response_model=RepositoryCloneResponse, status_code=status.HTTP_200_OK)
 def clone_repository(
     payload: RepositoryCloneRequest,
@@ -73,16 +112,7 @@ def clone_repository(
     owner_slug = payload.owner or "standalone"
     full_name = f"{owner_slug}/{payload.repository_name}"
 
-    import hashlib
-
-    # Derive a stable synthetic github_repo_id when not provided.
-    # Uses a deterministic SHA-256 digest of full_name to guarantee uniqueness per repo
-    # and consistency across process restarts.
-    if payload.github_repo_id is not None:
-        effective_github_repo_id = payload.github_repo_id
-    else:
-        digest = hashlib.sha256(full_name.encode("utf-8")).hexdigest()
-        effective_github_repo_id = int(digest, 16) % (10 ** 15)
+    effective_github_repo_id = _resolve_github_repo_id(payload, full_name)
 
     try:
         clone_result = git_service.clone_repository(
