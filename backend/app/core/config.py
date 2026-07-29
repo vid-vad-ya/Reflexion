@@ -23,8 +23,17 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
 
     # Third-party APIs
+    # LLM Configuration
+    LLM_PROVIDER: str = "groq"
+
+    # Gemini
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.0-flash"
+
+    # Groq
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    
 
     # Git Storage
     LOCAL_WORKSPACE_DIR: str = os.path.join(

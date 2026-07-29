@@ -1,167 +1,253 @@
 """Shared LLM Service Abstraction for Reflexion.
 
-Provides a centralized, singleton wrapper around the Google GenAI SDK.
-All AI components in Reflexion interact with LLMs exclusively via this service.
+Provider-agnostic wrapper supporting:
+- Google Gemini
+- Groq
+
+All AI components interact only through this service.
 """
 
+import json
 import logging
-import re
 import time
+import re
 from typing import Optional, Type, TypeVar
+
 from pydantic import BaseModel, ValidationError
+
+from app.core.config import settings
 
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-from app.core.config import settings
+from groq import Groq
+
 
 logger = logging.getLogger("reflexion.llm")
 
 T = TypeVar("T", bound=BaseModel)
 
-NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, "400", "401", "403", "404"}
-
 
 class LLMError(Exception):
-    """Base exception for all LLM service errors."""
     pass
 
 
 class LLMConfigurationError(LLMError):
-    """Raised when LLM configuration (API key, model settings) is invalid or missing."""
     pass
 
 
 class LLMAPIError(LLMError):
-    """Raised when an API or network operation fails."""
     pass
 
 
 class LLMValidationError(LLMError):
-    """Raised when response content fails schema validation."""
     pass
 
 
 class LLMService:
-    """Centralized singleton service for interacting with Gemini models.
-    
-    Provides clean methods for text generation, structured JSON generation with
-    Pydantic schema validation, and markdown response generation.
-    """
 
-    def __init__(self, api_key: Optional[str] = None, default_model: Optional[str] = None) -> None:
-        """Initialize the LLM service instance.
-        
-        Args:
-            api_key: Optional API key override. If None, uses settings.GEMINI_API_KEY.
-            default_model: Optional model override. If None, uses settings.GEMINI_MODEL.
-        """
-        self._api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
-        self._default_model = default_model or getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash")
-        self._client: Optional[genai.Client] = None
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        default_model: Optional[str] = None,
+    ):
+
+        self.provider = settings.LLM_PROVIDER.lower()
+
+        if self.provider == "groq":
+            self._api_key = api_key or settings.GROQ_API_KEY
+            self._default_model = (
+                default_model
+                or settings.GROQ_MODEL
+            )
+
+        elif self.provider == "gemini":
+            self._api_key = api_key or settings.GEMINI_API_KEY
+            self._default_model = (
+                default_model
+                or settings.GEMINI_MODEL
+            )
+
+        else:
+            raise LLMConfigurationError(
+                f"Unsupported LLM provider: {self.provider}"
+            )
+
+        self._client = None
+
 
     @property
-    def client(self) -> genai.Client:
-        """Get or initialize the singleton Gemini Client instance.
-        
-        Raises:
-            LLMConfigurationError: If GEMINI_API_KEY is not configured.
-        """
+    def client(self):
+
         if self._client is None:
+
             if not self._api_key:
-                logger.error("LLM initialization failed: GEMINI_API_KEY is not set.")
                 raise LLMConfigurationError(
-                    "GEMINI_API_KEY is missing. Please configure it in your environment or .env file."
+                    f"{self.provider.upper()} API key missing"
                 )
+
             try:
-                self._client = genai.Client(api_key=self._api_key)
-                logger.info("Initialized singleton Gemini client successfully.")
+
+                if self.provider == "groq":
+
+                    self._client = Groq(
+                        api_key=self._api_key
+                    )
+
+                    logger.info(
+                        "Initialized Groq client"
+                    )
+
+
+                elif self.provider == "gemini":
+
+                    self._client = genai.Client(
+                        api_key=self._api_key
+                    )
+
+                    logger.info(
+                        "Initialized Gemini client"
+                    )
+
+
             except Exception as e:
-                logger.error(f"Failed to instantiate Gemini client: {e}")
-                raise LLMConfigurationError(f"Failed to initialize Gemini client: {str(e)}") from e
+
+                raise LLMConfigurationError(
+                    f"Client initialization failed: {e}"
+                )
+
+
         return self._client
 
+
+
     @property
-    def default_model(self) -> str:
-        """Get the default model configured for the service."""
+    def default_model(self):
         return self._default_model
 
-    def _is_non_retryable(self, error: Exception) -> bool:
-        """Determine if an exception is non-retryable (400, 401, 403, 404, configuration, validation)."""
-        if isinstance(error, (LLMConfigurationError, LLMValidationError)):
-            return True
-        if isinstance(error, APIError):
-            code = getattr(error, "code", None)
-            if code in NON_RETRYABLE_STATUS_CODES:
-                return True
-            msg = str(error).upper()
-            if any(term in msg for term in ("NOT_FOUND", "404", "INVALID_ARGUMENT", "UNAUTHORIZED", "PERMISSION_DENIED")):
-                if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg:
-                    return True
-        return False
+
 
     def _execute_with_retry(
         self,
         model: str,
         contents: str,
-        config: types.GenerateContentConfig,
+        system_instruction: Optional[str] = None,
+        temperature: float = 0.2,
+        json_mode: bool = False,
         max_attempts: int = 3,
-        initial_backoff: float = 2.0,
-    ) -> types.GenerateContentResponse:
-        """Internal helper to execute generate_content with exponential backoff retries.
-        
-        Args:
-            model: Target Gemini model identifier.
-            contents: Prompt contents string.
-            config: GenerateContentConfig object.
-            max_attempts: Maximum total attempts (default 3).
-            initial_backoff: Base delay in seconds for exponential backoff.
-            
-        Returns:
-            GenerateContentResponse object.
-            
-        Raises:
-            LLMAPIError: If execution fails after maximum attempts or encounters non-retryable error.
-        """
-        client = self.client
-        last_exception: Optional[Exception] = None
+    ):
+
+        last_exception = None
+
 
         for attempt in range(1, max_attempts + 1):
+
             try:
-                logger.info(f"Executing LLM request [Model: {model}] (Attempt {attempt}/{max_attempts})")
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config,
+
+                logger.info(
+                    f"LLM request {attempt}/{max_attempts} "
+                    f"[{self.provider}:{model}]"
                 )
-                logger.info(f"LLM request completed successfully [Model: {model}]")
-                return response
+
+
+                # -----------------------------
+                # GROQ
+                # -----------------------------
+
+                if self.provider == "groq":
+
+                    response = self.client.chat.completions.create(
+
+                        model=model,
+
+                        messages=[
+
+                            {
+                                "role": "system",
+                                "content": system_instruction
+                                or ""
+                            },
+
+                            {
+                                "role": "user",
+                                "content": contents
+                            }
+
+                        ],
+
+                        temperature=temperature,
+
+                        response_format=(
+                            {"type": "json_object"}
+                            if json_mode
+                            else None
+                        )
+                    )
+
+
+                    return response.choices[0].message.content
+
+
+
+                # -----------------------------
+                # GEMINI
+                # -----------------------------
+
+                elif self.provider == "gemini":
+
+                    config = types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=temperature,
+
+                        response_mime_type=(
+                            "application/json"
+                            if json_mode
+                            else None
+                        )
+                    )
+
+
+                    response = self.client.models.generate_content(
+
+                        model=model,
+
+                        contents=contents,
+
+                        config=config
+                    )
+
+
+                    return response.text
+
+
             except Exception as e:
+
                 last_exception = e
-                if self._is_non_retryable(e):
-                    logger.error(f"Non-retryable error encountered on attempt {attempt}: {str(e)}")
-                    raise LLMAPIError(f"Gemini API Non-retryable Error: {str(e)}") from e
 
                 msg = str(e)
-                logger.warning(f"Transient error on attempt {attempt}/{max_attempts}: {msg}")
+
+                logger.warning(
+                    f"LLM failure attempt {attempt}: {msg}"
+                )
+
 
                 if attempt < max_attempts:
-                    sleep_time = initial_backoff * (2 ** (attempt - 1))
-                    
-                    # Parse dynamic retry delay if provided by Gemini API for rate limits
-                    if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                        match = re.search(r"retryDelay': '(\d+)s", msg) or re.search(r"retry in (\d+\.?\d*)s", msg)
-                        if match:
-                            sleep_time = max(sleep_time, float(match.group(1)) + 0.5)
-                        else:
-                            sleep_time = max(sleep_time, 5.0)
 
-                    logger.info(f"Retrying LLM call in {sleep_time:.1f} seconds...")
-                    time.sleep(sleep_time)
+                    delay = 2 ** (attempt - 1)
 
-        logger.error(f"LLM request failed after {max_attempts} attempts [Model: {model}]")
-        raise LLMAPIError(f"LLM API request failed after {max_attempts} attempts: {str(last_exception)}") from last_exception
+                    if "429" in msg:
+                        delay = 10
+
+                    time.sleep(delay)
+
+
+
+        raise LLMAPIError(
+            f"LLM request failed: {last_exception}"
+        )
+
+
 
     def generate_text(
         self,
@@ -170,24 +256,21 @@ class LLMService:
         temperature: float = 0.2,
         model: Optional[str] = None,
     ) -> str:
-        """Generate plain text from prompt."""
-        target_model = model or self._default_model
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=temperature,
-        )
 
-        response = self._execute_with_retry(
-            model=target_model,
+
+        return self._execute_with_retry(
+
+            model=model or self.default_model,
+
             contents=prompt,
-            config=config,
-        )
 
-        if not response.text:
-            logger.error("LLM returned empty or null text response.")
-            raise LLMAPIError("Gemini API returned an empty response.")
+            system_instruction=system_instruction,
 
-        return response.text.strip()
+            temperature=temperature
+
+        ).strip()
+
+
 
     def generate_json(
         self,
@@ -197,40 +280,69 @@ class LLMService:
         temperature: float = 0.2,
         model: Optional[str] = None,
     ) -> T:
-        """Generate structured response validated against a Pydantic schema."""
-        target_model = model or self._default_model
-        config = types.GenerateContentConfig(
+
+        schema_text = json.dumps(
+            response_schema.model_json_schema(),
+            indent=2
+        )
+
+        enhanced_prompt = f"""
+    You must return ONLY valid JSON.
+
+    The JSON MUST exactly match this schema:
+
+    {schema_text}
+
+    Do not rename fields.
+    Do not add wrapper objects.
+    Do not create nested objects for fields that expect lists.
+    Do not use camelCase. Use snake_case exactly.
+
+    User request:
+
+    {prompt}
+    """
+
+
+        raw_response = self._execute_with_retry(
+            model=model or self.default_model,
+            contents=enhanced_prompt,
             system_instruction=system_instruction,
-            temperature=temperature,
-            response_mime_type="application/json",
-            response_schema=response_schema,
+            temperature=0.1,
+            json_mode=True,
         )
 
-        response = self._execute_with_retry(
-            model=target_model,
-            contents=prompt,
-            config=config,
-        )
-
-        if hasattr(response, "parsed") and isinstance(response.parsed, response_schema):
-            return response.parsed
-
-        raw_text = response.text
-        if not raw_text:
-            logger.error("Structured output generation returned empty response text.")
-            raise LLMValidationError("Gemini API returned an empty text response for structured JSON.")
 
         try:
-            validated_object = response_schema.model_validate_json(raw_text)
-            return validated_object
-        except ValidationError as ve:
-            logger.error(f"Pydantic schema validation failed for model {response_schema.__name__}: {ve}")
+
+            data = json.loads(raw_response)
+
+            # Remove accidental wrapper objects
+            if len(data) == 1:
+                value = next(iter(data.values()))
+
+                if isinstance(value, dict):
+                    data = value
+
+
+            return response_schema.model_validate(data)
+
+
+        except ValidationError as e:
+
+            logger.error(
+                f"Schema validation failed: {e}"
+            )
+
+            logger.error(
+                f"Raw response: {raw_response}"
+            )
+
             raise LLMValidationError(
-                f"Failed to validate response against schema {response_schema.__name__}: {str(ve)}"
-            ) from ve
-        except Exception as e:
-            logger.error(f"Failed to parse JSON response: {e}")
-            raise LLMValidationError(f"Invalid JSON returned by LLM: {str(e)}") from e
+                str(e)
+            )
+
+
 
     def generate_markdown(
         self,
@@ -239,22 +351,26 @@ class LLMService:
         temperature: float = 0.2,
         model: Optional[str] = None,
     ) -> str:
-        """Generate markdown-formatted text response."""
-        markdown_instruction = (
-            "Format your response cleanly in valid Markdown using headings, lists, code blocks, or tables where appropriate."
+
+
+        instruction = (
+            "Format response using clean Markdown."
         )
-        combined_instruction = (
-            f"{system_instruction}\n\n{markdown_instruction}" if system_instruction else markdown_instruction
-        )
+
+
+        if system_instruction:
+            instruction += "\n" + system_instruction
+
 
         return self.generate_text(
-            prompt=prompt,
-            system_instruction=combined_instruction,
-            temperature=temperature,
-            model=model,
+            prompt,
+            instruction,
+            temperature,
+            model
         )
 
 
-# Global singleton instance and shortcut alias
+
 llm_service = LLMService()
+
 llm = llm_service
