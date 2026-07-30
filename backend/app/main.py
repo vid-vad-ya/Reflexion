@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.auth import router as auth_router
 from app.api.v1.repositories import router as repositories_router
 from app.api.v1.planner import router as planner_router
+from app.api.v1.coder import router as coder_router
 from app.core.config import settings
 
 
@@ -47,6 +48,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["Auth"])
 app.include_router(repositories_router, prefix=f"{settings.API_V1_STR}/repositories", tags=["Repositories"])
 app.include_router(planner_router, prefix=f"{settings.API_V1_STR}/repositories", tags=["Planner"])
+app.include_router(coder_router, prefix=f"{settings.API_V1_STR}/repositories", tags=["Coder"])
 
 
 @app.get("/")

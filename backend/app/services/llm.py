@@ -317,6 +317,10 @@ class LLMService:
 
             data = json.loads(raw_response)
 
+            print("\n================ RAW LLM JSON ================\n")
+            print(json.dumps(data, indent=2))
+            print("\n==============================================\n")
+
             # Remove accidental wrapper objects
             if len(data) == 1:
                 value = next(iter(data.values()))
@@ -324,6 +328,9 @@ class LLMService:
                 if isinstance(value, dict):
                     data = value
 
+            print("\n================ AFTER UNWRAPPING ================\n")
+            print(json.dumps(data, indent=2))
+            print("\n==================================================\n")
 
             return response_schema.model_validate(data)
 
