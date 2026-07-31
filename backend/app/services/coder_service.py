@@ -14,7 +14,7 @@ import difflib
 import logging
 import os
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 from sqlmodel import Session
@@ -341,69 +341,79 @@ class CoderService:
 
     def generate_code(
         self,
-        repository_id: uuid.UUID,
-        session: Session,
+        repository_id: Optional[uuid.UUID] = None,
+        session: Optional[Session] = None,
         implementation_plan: Optional[ImplementationPlan] = None,
         user_prompt_override: Optional[str] = None,
+        project_summary: Optional[ProjectSummary] = None,
+        reflection_result: Optional[Any] = None,
     ) -> CodingResult:
-        """Generate implementation code changes for a repository based on an ImplementationPlan.
+        """Generate implementation code changes based on an ImplementationPlan.
 
-        Args:
-            repository_id: Database UUID of target repository.
-            session: Active database session.
-            implementation_plan: Optional explicit plan. If None, uses existing DB context.
-            user_prompt_override: Optional user instructions.
-
-        Returns:
-            CodingResult: Structured response containing files, explanations, diffs, and summary.
+        Can be invoked either via DB context (repository_id, session) or directly
+        with in-memory schemas (project_summary, implementation_plan). Completely
+        filesystem agnostic.
         """
-        logger.info(f"Initiating incremental code generation request for repository_id='{repository_id}'")
+        repo = None
+        repo_local_path = None
 
-        # 1. Load & validate Repository
-        repo = session.get(Repository, repository_id)
-        if not repo:
-            logger.warning(f"Repository with ID '{repository_id}' not found in database.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository with ID '{repository_id}' not found.",
-            )
-
-        # 2. Check workspace directory
-        if not repo.local_path or not os.path.exists(repo.local_path):
-            logger.error(f"Local path for repository '{repository_id}' does not exist: '{repo.local_path}'")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Repository workspace directory does not exist locally. Please clone the repository first.",
-            )
-
-        # 3. Check ProjectSummary
-        if not repo.project_summary:
-            logger.warning(f"Repository '{repository_id}' ({repo.full_name}) lacks project_summary.")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Repository workspace has not been analyzed yet. Please run POST /api/v1/repositories/analyze first.",
-            )
-
-        try:
+        if project_summary is None or implementation_plan is None:
+            if not repository_id or not session:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Either (project_summary, implementation_plan) or (repository_id, session) must be provided.",
+                )
+            logger.info(f"Initiating code generation request for repository_id='{repository_id}'")
+            repo = session.get(Repository, repository_id)
+            if not repo:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Repository with ID '{repository_id}' not found.",
+                )
+            if not repo.project_summary:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Repository workspace has not been analyzed yet.",
+                )
             project_summary = ProjectSummary.model_validate(repo.project_summary)
-        except Exception as ve:
-            logger.error(f"Failed to parse cached project_summary JSON for repository '{repository_id}': {ve}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Invalid project_summary structure stored in database: {str(ve)}",
-            )
+            plan = implementation_plan
+            if not plan:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No ImplementationPlan provided.",
+                )
+            repo_local_path = repo.local_path
+        else:
+            plan = implementation_plan
 
-        # 4. Resolve Implementation Plan
-        plan = implementation_plan
-        if not plan:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No ImplementationPlan provided in request payload. Please generate a plan via POST /api/v1/repositories/{id}/plan first.",
+        # Combine reflection_result guidance into prompt override if provided
+        prompt_override = user_prompt_override or ""
+        if reflection_result is not None:
+            repair_notes = (
+                f"\nREPAIR GUIDANCE (Previous attempt failed with {reflection_result.failure_category}):\n"
+                f"Root Cause: {reflection_result.root_cause}\n"
+                f"Recommendations:\n"
+                + "\n".join(f"- {r}" for r in reflection_result.recommendations)
             )
+            prompt_override = (prompt_override + "\n" + repair_notes).strip()
 
-        # 5. Collect target files (affected_files + new_files deduplicated)
+        # Resolve target files based on retry_scope if reflection_result provided
         new_files_set = set(plan.new_files or [])
         affected_files_list = plan.affected_files or []
+
+        if reflection_result is not None and getattr(reflection_result, "retry_scope", None):
+            from app.schemas.reflector import RetryScope
+            scope = reflection_result.retry_scope
+            if scope == RetryScope.SINGLE_FILE:
+                if reflection_result.affected_files:
+                    affected_files_list = reflection_result.affected_files[:1]
+                    new_files_set = {f for f in affected_files_list if f in new_files_set}
+                elif plan.affected_files:
+                    affected_files_list = plan.affected_files[:1]
+            elif scope == RetryScope.MULTIPLE_FILES:
+                if reflection_result.affected_files:
+                    affected_files_list = reflection_result.affected_files
+                    new_files_set = {f for f in affected_files_list if f in new_files_set}
 
         all_target_files: List[Tuple[str, bool]] = []
         seen = set()
@@ -447,13 +457,13 @@ class CoderService:
                 logger.info(f"Generating code for file '{rel_path}' (is_new={is_new})")
                 orig_content = None
 
-                if not is_new:
-                    content, warn = _load_single_file(repo.local_path, rel_path)
+                if not is_new and repo_local_path:
+                    content, warn = _load_single_file(repo_local_path, rel_path)
                     orig_content = content
                     if warn:
                         all_warnings.append(warn)
 
-                    abs_p = os.path.abspath(os.path.join(repo.local_path, rel_path))
+                    abs_p = os.path.abspath(os.path.join(repo_local_path, rel_path))
                     if not os.path.exists(abs_p):
                         is_new = True
 
@@ -463,14 +473,15 @@ class CoderService:
                     file_path=rel_path,
                     original_content=orig_content,
                     is_new_file=is_new,
-                    user_prompt_override=user_prompt_override,
+                    user_prompt_override=prompt_override,
                 )
                 processed_files.append(gen_file)
                 if gen_file.unified_diff:
                     diff_map[rel_path] = gen_file.unified_diff
 
             # 7. Final lightweight LLM summarization call
-            logger.info(f"Invoking final LLM summarization call for repository '{repo.full_name}'")
+            repo_name = repo.full_name if repo else project_summary.project_name
+            logger.info(f"Invoking final LLM summarization call for repository '{repo_name}'")
             summary_result = _generate_overall_summary(plan, processed_files)
 
             final_result = CodingResult(
@@ -481,20 +492,23 @@ class CoderService:
                 warnings=all_warnings,
             )
 
+            repo_id_str = repository_id or (project_summary.project_name if project_summary else "unknown")
             logger.info(
-                f"Successfully completed incremental code generation for repository '{repository_id}' "
+                f"Successfully completed incremental code generation for repository '{repo_id_str}' "
                 f"[Files generated: {len(final_result.generated_files)}, Diffs: {len(final_result.unified_diffs)}]"
             )
             return final_result
 
         except (LLMValidationError, LLMError) as le:
-            logger.error(f"LLM service failure during code generation for repository '{repository_id}': {le}")
+            repo_id_str = repository_id or (project_summary.project_name if project_summary else "unknown")
+            logger.error(f"LLM service failure during code generation for repository '{repo_id_str}': {le}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"LLM coder agent failed to generate structured code: {str(le)}",
             )
         except Exception as e:
-            logger.error(f"Unexpected error during code generation for repository '{repository_id}': {e}")
+            repo_id_str = repository_id or (project_summary.project_name if project_summary else "unknown")
+            logger.error(f"Unexpected error during code generation for repository '{repo_id_str}': {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An unexpected error occurred while generating code: {str(e)}",
